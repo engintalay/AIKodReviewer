@@ -19,6 +19,10 @@ else
     exit 1
 fi
 
+# Proxy'ları devre dışı bırak (corporate network sorunları için)
+unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY FTP_PROXY SOCKS_PROXY
+unset NO_PROXY no_proxy
+
 # Varsayılan değerler (eğer .env'de yoksa)
 LMSTUDIO_BASE_URL=${LMSTUDIO_BASE_URL:-"http://localhost:8000/v1"}
 BACKEND_URL=${BACKEND_URL:-"http://localhost:5000"}

@@ -5,6 +5,10 @@
 
 set -e
 
+# Proxy'ları devre dışı bırak (corporate network sorunları için)
+unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY FTP_PROXY SOCKS_PROXY
+unset NO_PROXY no_proxy
+
 echo "🚀 AI Kod Reviewer Kurulumu Başlatılıyor..."
 echo ""
 

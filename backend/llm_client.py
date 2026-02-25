@@ -19,6 +19,10 @@ class LMStudioClient:
         # Session setup with connection pooling
         self.session = requests.Session()
         
+        # Proxy'ları devre dışı bırak (özellikle corporate networks için)
+        self.session.trust_env = False
+        self.session.proxies = {}
+        
         # Retry strategy
         retry_strategy = Retry(
             total=2,
