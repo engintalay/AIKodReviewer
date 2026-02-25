@@ -6,6 +6,9 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import tempfile
 from pathlib import Path
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from models import (
     UploadResponse, AnalysisResponse, QueryRequest, QueryResponse
@@ -29,9 +32,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Konfigürasyon (.env dosyasinden)
+BACKEND_HOST = os.getenv("BACKEND_HOST", "0.0.0.0")
+BACKEND_PORT = int(os.getenv("BACKEND_PORT", 5000))
+LMSTUDIO_BASE_URL = os.getenv("LMSTUDIO_BASE_URL", "http://localhost:8000/v1")
+LMSTUDIO_MODEL = os.getenv("LMSTUDIO_MODEL", "mistral-7b-instruct-v0.3")
+
 # Global nesneler
 indexer = CodeIndexer()
-llm_client = LMStudioClient()
+llm_client = LMStudioClient(base_url=LMSTUDIO_BASE_URL, model=LMSTUDIO_MODEL)
 
 # Yüklenen projelerin geçici depolama yolları
 UPLOAD_DIR = tempfile.mkdtemp(prefix="aikodreviewer_")
@@ -225,4 +234,11 @@ async def list_projects():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=5000)
+    import argparse
+    
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--host", default=BACKEND_HOST, help="Backend host")
+    parser.add_argument("--port", type=int, default=BACKEND_PORT, help="Backend port")
+    args = parser.parse_args()
+    
+    uvicorn.run(app, host=args.host, port=args.port)
