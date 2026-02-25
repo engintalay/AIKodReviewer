@@ -2,6 +2,8 @@ import requests
 import json
 import time
 from typing import List, Dict, Optional
+from urllib3.util.retry import Retry
+from requests.adapters import HTTPAdapter
 from models import CodeSnippet
 
 
@@ -13,23 +15,52 @@ class LMStudioClient:
         self.model = model
         self.chat_endpoint = f"{base_url}/chat/completions"
         self.models_endpoint = f"{base_url}/models"
+        
+        # Session setup with connection pooling
+        self.session = requests.Session()
+        
+        # Retry strategy
+        retry_strategy = Retry(
+            total=2,
+            backoff_factor=1,
+            status_forcelist=[429, 500, 502, 503, 504]
+        )
+        
+        # Adapter configuration  
+        adapter = HTTPAdapter(
+            max_retries=retry_strategy,
+            pool_connections=2,
+            pool_maxsize=2,
+            pool_block=False
+        )
+        
+        self.session.mount("http://", adapter)
+        self.session.mount("https://", adapter)
     
     def check_connection(self) -> bool:
         """LMStudio'ya bağlantı kontrolü yap"""
         try:
-            response = requests.get(self.models_endpoint, timeout=5)
+            response = self.session.get(self.models_endpoint, timeout=15)
             return response.status_code == 200
+        except requests.exceptions.Timeout:
+            print(f"⏱️  LMStudio bağlantı zaman aşımı (15s)")
+            return False
+        except requests.exceptions.ConnectionError:
+            print(f"❌ LMStudio bağlanamıyor: {self.models_endpoint}")
+            return False
         except Exception as e:
-            print(f"LMStudio bağlantı hatası: {e}")
+            print(f"⚠️  LMStudio hata: {e}")
             return False
     
     def get_available_models(self) -> List[str]:
         """Mevcut modelleri getir"""
         try:
-            response = requests.get(self.models_endpoint, timeout=5)
+            response = self.session.get(self.models_endpoint, timeout=15)
             if response.status_code == 200:
                 data = response.json()
                 return [model.get("id", "") for model in data.get("data", [])]
+        except requests.exceptions.Timeout:
+            print(f"⏱️  Model listesi zaman aşımı")
         except Exception as e:
             print(f"Model listesi alınırken hata: {e}")
         return []
@@ -106,10 +137,10 @@ CEVAP:"""
                 "stream": False
             }
             
-            response = requests.post(
+            response = self.session.post(
                 self.chat_endpoint,
                 json=payload,
-                timeout=60
+                timeout=120
             )
             
             if response.status_code == 200:
@@ -120,7 +151,7 @@ CEVAP:"""
                 return f"API Hatası: {response.status_code} - {response.text}"
         
         except requests.exceptions.Timeout:
-            return "❌ Hata: Sorgu zaman aşımı (Timeout - 60 saniye)"
+            return "❌ Hata: Sorgu zaman aşımı (Timeout - 120 saniye)"
         except requests.exceptions.ConnectionError:
             return "❌ Hata: LMStudio'ya bağlanılamıyor. Lütfen LMStudio'yu başlattığınızdan emin olun."
         except Exception as e:
