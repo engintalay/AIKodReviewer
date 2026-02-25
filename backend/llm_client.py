@@ -1,0 +1,153 @@
+import requests
+import json
+import time
+from typing import List, Dict, Optional
+from models import CodeSnippet
+
+
+class LMStudioClient:
+    """LMStudio OpenAI-compatible API istemcisi"""
+    
+    def __init__(self, base_url: str = "http://localhost:8000/v1", model: str = "mistral-7b-instruct-v0.3"):
+        self.base_url = base_url
+        self.model = model
+        self.chat_endpoint = f"{base_url}/chat/completions"
+        self.models_endpoint = f"{base_url}/models"
+    
+    def check_connection(self) -> bool:
+        """LMStudio'ya bağlantı kontrolü yap"""
+        try:
+            response = requests.get(self.models_endpoint, timeout=5)
+            return response.status_code == 200
+        except Exception as e:
+            print(f"LMStudio bağlantı hatası: {e}")
+            return False
+    
+    def get_available_models(self) -> List[str]:
+        """Mevcut modelleri getir"""
+        try:
+            response = requests.get(self.models_endpoint, timeout=5)
+            if response.status_code == 200:
+                data = response.json()
+                return [model.get("id", "") for model in data.get("data", [])]
+        except Exception as e:
+            print(f"Model listesi alınırken hata: {e}")
+        return []
+    
+    def query_with_context(
+        self, 
+        question: str, 
+        code_snippets: List[CodeSnippet],
+        max_tokens: int = 1000,
+        temperature: float = 0.7
+    ) -> tuple[str, float]:
+        """Kod konteksti ile sorgu yap"""
+        
+        # Konteksti hazırla
+        context = self._build_context(code_snippets)
+        
+        # Prompt'u oluştur
+        prompt = self._build_prompt(question, context)
+        
+        # API'ya iste gönder
+        start_time = time.time()
+        response_text = self._call_api(prompt, max_tokens, temperature)
+        elapsed_time = time.time() - start_time
+        
+        return response_text, elapsed_time
+    
+    def _build_context(self, code_snippets: List[CodeSnippet]) -> str:
+        """Kod parçacıklarından kontekst oluştur"""
+        if not code_snippets:
+            return ""
+        
+        context_parts = []
+        for snippet in code_snippets:
+            context_parts.append(f"--- File: {snippet.file_path} (Lines {snippet.start_line}-{snippet.end_line}) ---")
+            context_parts.append(snippet.code)
+            context_parts.append("")
+        
+        return "\n".join(context_parts)
+    
+    def _build_prompt(self, question: str, context: str) -> str:
+        """Prompt'u oluştur"""
+        
+        if context:
+            prompt = f"""Aşağıdaki kod parçacıklarını ve konteksti dikkate alarak soruya cevap ver.
+
+KONTEKST:
+{context}
+
+SORU: {question}
+
+CEVAP:"""
+        else:
+            prompt = f"""Şu soruya cevap ver:
+
+SORU: {question}
+
+CEVAP:"""
+        
+        return prompt
+    
+    def _call_api(self, prompt: str, max_tokens: int = 1000, temperature: float = 0.7) -> str:
+        """LMStudio API'sını çağır"""
+        try:
+            payload = {
+                "model": self.model,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ],
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "stream": False
+            }
+            
+            response = requests.post(
+                self.chat_endpoint,
+                json=payload,
+                timeout=60
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                if "choices" in data and len(data["choices"]) > 0:
+                    return data["choices"][0]["message"]["content"]
+            else:
+                return f"API Hatası: {response.status_code} - {response.text}"
+        
+        except requests.exceptions.Timeout:
+            return "❌ Hata: Sorgu zaman aşımı (Timeout - 60 saniye)"
+        except requests.exceptions.ConnectionError:
+            return "❌ Hata: LMStudio'ya bağlanılamıyor. Lütfen LMStudio'yu başlattığınızdan emin olun."
+        except Exception as e:
+            return f"❌ Hata: {str(e)}"
+    
+    def extract_references_from_response(
+        self,
+        question: str,
+        code_elements: List[Dict],
+        response: str
+    ) -> List[Dict]:
+        """Cevaptan ilgili kod referanslarını çıkart"""
+        
+        references = []
+        response_lower = response.lower()
+        
+        for element in code_elements:
+            element_name_lower = element.get("name", "").lower()
+            file_path = element.get("file_path", "")
+            
+            # Basit keyword matching
+            if element_name_lower and element_name_lower in response_lower:
+                references.append({
+                    "file": file_path,
+                    "element": element.get("name"),
+                    "type": element.get("type"),
+                    "lines": [element.get("start_line"), element.get("end_line")]
+                })
+        
+        return references
