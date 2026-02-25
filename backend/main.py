@@ -1,20 +1,97 @@
 import os
 import shutil
 import zipfile
-from fastapi import FastAPI, UploadFile, File, HTTPException
+import logging
+import json
+from datetime import datetime
+from fastapi import FastAPI, UploadFile, File, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 import tempfile
 from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv()
 
+# Logging yapılandırması
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('/tmp/backend.log'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
 from models import (
     UploadResponse, AnalysisResponse, QueryRequest, QueryResponse
 )
 from indexer import CodeIndexer
 from llm_client import LMStudioClient
+
+
+# Request Logging Middleware
+class RequestLoggingMiddleware(BaseHTTPMiddleware):
+    """HTTP istek/yanıt logging'i için middleware"""
+    
+    async def dispatch(self, request: Request, call_next):
+        # Request detaylarını log et
+        request_id = datetime.now().isoformat()
+        content_type = request.headers.get('content-type', 'N/A')
+        
+        # GET ve POST isteklerini farklı şekilde log et
+        if request.method in ["POST", "PUT", "PATCH"]:
+            try:
+                # Content-Type'ı kontrol et
+                if 'multipart/form-data' in content_type or 'application/octet-stream' in content_type:
+                    # Binary/Multipart data için - body'yi log etme
+                    logger.info(
+                        f"📨 [{request.method}] {request.url.path}\n"
+                        f"   🔷 Content-Type: {content_type}\n"
+                        f"   🔶 Body: [BINARY DATA - File Upload]"
+                    )
+                    # Body'yi oku ama discard et (middleware'nin stream'i tüketmesi sorunu için)
+                    body = await request.body()
+                    
+                    async def receive():
+                        return {"type": "http.request", "body": body}
+                    
+                    request._receive = receive
+                else:
+                    # JSON/Text data için - body'yi decode et ve log et
+                    body = await request.body()
+                    try:
+                        body_str = body.decode('utf-8') if body else ""
+                    except:
+                        body_str = f"[BINARY DATA - {len(body)} bytes]"
+                    
+                    logger.info(
+                        f"📨 [{request.method}] {request.url.path}\n"
+                        f"   🔷 Content-Type: {content_type}\n"
+                        f"   🔶 Body: {body_str[:300] if body_str else 'empty'}"
+                    )
+                    
+                    # Body'yi tekrar attach et
+                    async def receive():
+                        return {"type": "http.request", "body": body}
+                    
+                    request._receive = receive
+                    
+            except Exception as e:
+                logger.warning(f"⚠️  Request body okunamadı: {str(e)}")
+        else:
+            logger.info(f"📥 [{request.method}] {request.url.path}")
+        
+        # Response'u al
+        response = await call_next(request)
+        
+        # Response'u log et
+        logger.info(f"📤 [{response.status_code}] {request.url.path}")
+        
+        return response
+
 
 # FastAPI uygulamasını oluştur
 app = FastAPI(
@@ -23,7 +100,8 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# CORS middleware'i ekle
+# Middleware'leri ekle (sıra önemlidir - Request logging önce gelsin)
+app.add_middleware(RequestLoggingMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -50,30 +128,44 @@ PROJECT_STORE = {}  # {project_id: project_path}
 @app.on_event("startup")
 async def startup_event():
     """Uygulamayı başlat"""
-    print("🚀 AI Kod Reviewer başlatılıyor...")
+    logger.info("=" * 60)
+    logger.info("🚀 AI KOD REVIEWER BAŞLATILIYOR 🚀")
+    logger.info("=" * 60)
+    logger.info(f"Backend Port: {BACKEND_PORT}")
+    logger.info(f"LMStudio URL: {LMSTUDIO_BASE_URL}")
+    logger.info(f"Model: {LMSTUDIO_MODEL}")
+    logger.info("=" * 60)
     
     # LMStudio bağlantısını kontrol et
     if llm_client.check_connection():
-        print("✅ LMStudio bağlantısı başarılı")
+        logger.info("✅ LMStudio bağlantısı başarılı")
         models = llm_client.get_available_models()
         if models:
-            print(f"📦 Mevcut modeller: {models}")
+            logger.info(f"📦 Mevcut modeller: {models}")
     else:
-        print("⚠️ LMStudio bağlanılamadı - Lütfen LMStudio'yu başlatın (http://localhost:8000)")
+        logger.warning("⚠️  LMStudio bağlanılamadı - Lütfen LMStudio'yu başlatın")
+        logger.warning(f"   Bağlantı yoluyla: {LMSTUDIO_BASE_URL}")
 
 
 @app.on_event("shutdown")
 async def shutdown_event():
     """Uygulamayı kapat"""
-    print("🛑 Temizlik yapılıyor...")
+    logger.info("=" * 60)
+    logger.info("🛑 KAPATILIYOR... 🛑")
+    logger.info("=" * 60)
+    
     if os.path.exists(UPLOAD_DIR):
         shutil.rmtree(UPLOAD_DIR)
-    print("✅ Kapalı")
+        logger.info(f"🧹 Geçici dosyalar temizlendi: {UPLOAD_DIR}")
+    
+    logger.info("✅ Güvenle kapatıldı")
+    logger.info("=" * 60)
 
 
 @app.get("/")
 async def root():
     """Root endpoint"""
+    logger.info("📍 Root endpoint ziyareti")
     return {
         "message": "AI Kod Reviewer API",
         "endpoints": {
@@ -89,6 +181,9 @@ async def root():
 async def health_check():
     """Sistem sağlığını kontrol et"""
     lm_connected = llm_client.check_connection()
+    projects_count = len(indexer.projects)
+    
+    logger.debug(f"🏥 Sağlık kontrolü: LMStudio={'✅' if lm_connected else '❌'}, Projeler={projects_count}")
     
     return {
         "status": "ok",
@@ -97,7 +192,7 @@ async def health_check():
             "base_url": llm_client.base_url,
             "model": llm_client.model
         },
-        "projects_loaded": len(indexer.projects)
+        "projects_loaded": projects_count
     }
 
 
@@ -105,6 +200,8 @@ async def health_check():
 async def upload_project(file: UploadFile = File(...)):
     """Proje dosyasını (zip) yükle"""
     try:
+        logger.info(f"📦 Yükleme başladı: {file.filename} (Size: {file.size} bytes)")
+        
         # Geçici dosya oluştur
         temp_file = os.path.join(UPLOAD_DIR, file.filename)
         
@@ -112,19 +209,32 @@ async def upload_project(file: UploadFile = File(...)):
             content = await file.read()
             f.write(content)
         
+        logger.info(f"💾 Dosya kaydedildi: {temp_file}")
+        
         # ZIP'i aç
         extract_dir = os.path.join(UPLOAD_DIR, Path(file.filename).stem)
         
         if zipfile.is_zipfile(temp_file):
             with zipfile.ZipFile(temp_file, 'r') as zip_ref:
                 zip_ref.extractall(extract_dir)
+            logger.info(f"📂 ZIP açıldı: {extract_dir}")
         else:
             # Eğer ZIP değilse, klasör olarak kabul et
             extract_dir = temp_file
         
         # Projeyi indexle
+        logger.info(f"🔍 Proje indeksleniyor: {extract_dir}")
         project_id, project_index = indexer.index_project(extract_dir)
         PROJECT_STORE[project_id] = extract_dir
+        
+        logger.info(
+            f"✅ Yükleme başarılı!\n"
+            f"   📋 Project ID: {project_id}\n"
+            f"   📁 Dosya sayısı: {project_index.total_files}\n"
+            f"   🎯 Desteklenen: {project_index.supported_files}\n"
+            f"   💾 Kod elemanı: {len(project_index.elements)}\n"
+            f"   🗣️  Diller: {', '.join(project_index.languages)}"
+        )
         
         return UploadResponse(
             project_id=project_id,
@@ -134,6 +244,7 @@ async def upload_project(file: UploadFile = File(...)):
         )
     
     except Exception as e:
+        logger.error(f"❌ Yükleme hatası: {str(e)}", exc_info=True)
         raise HTTPException(status_code=400, detail=f"Yükleme hatası: {str(e)}")
 
 
@@ -141,10 +252,19 @@ async def upload_project(file: UploadFile = File(...)):
 async def analyze_project(project_id: str):
     """Yüklenen projeyi analiz et"""
     try:
+        logger.info(f"🔍 Analiz başlıyor: {project_id}")
+        
         if project_id not in indexer.projects:
+            logger.error(f"❌ Proje bulunamadı: {project_id}")
             raise HTTPException(status_code=404, detail="Proje bulunamadı")
         
         project_index = indexer.get_project_index(project_id)
+        
+        logger.info(
+            f"✅ Analiz tamamlandı: {project_id}\n"
+            f"   📊 Toplam element: {len(project_index.elements)}\n"
+            f"   🗣️  Diller: {', '.join(project_index.languages)}"
+        )
         
         return AnalysisResponse(
             project_id=project_id,
@@ -154,7 +274,10 @@ async def analyze_project(project_id: str):
             message=f"{len(project_index.elements)} kod elementi bulundu"
         )
     
+    except HTTPException:
+        raise
     except Exception as e:
+        logger.error(f"❌ Analiz hatası: {str(e)}", exc_info=True)
         raise HTTPException(status_code=400, detail=f"Analiz hatası: {str(e)}")
 
 
@@ -162,11 +285,19 @@ async def analyze_project(project_id: str):
 async def query_project(request: QueryRequest):
     """Projeye soru sor"""
     try:
+        logger.info(
+            f"❓ Sorgu başladı:\n"
+            f"   🆔 Project ID: {request.project_id}\n"
+            f"   ❓ Soru: {request.question[:100]}..."
+        )
+        
         if request.project_id not in indexer.projects:
+            logger.error(f"❌ Proje bulunamadı: {request.project_id}")
             raise HTTPException(status_code=404, detail="Proje bulunamadı")
         
         # İlgili kod elementlerini ara
         relevant_elements = indexer.search_elements(request.project_id, request.question)
+        logger.info(f"🔎 {len(relevant_elements)} ilgili kod elemanı bulundu")
         
         # Kod snippet'larını topla
         code_snippets = []
@@ -180,11 +311,17 @@ async def query_project(request: QueryRequest):
             if snippet:
                 code_snippets.append(snippet)
         
+        logger.info(f"📝 {len(code_snippets)} kod snippet'ı toplandı")
+        
         # LMStudio'ya soru sor
+        logger.info("🤖 LMStudio'ya sorgu gönderiliyor...")
         answer, processing_time = llm_client.query_with_context(
             request.question,
             code_snippets
         )
+        
+        logger.info(f"✅ LMStudio cevap verdi ({processing_time:.2f}s)")
+        logger.info(f"📢 Cevap: {answer[:150]}...")
         
         # Referansları çıkart
         project_index = indexer.get_project_index(request.project_id)
@@ -204,6 +341,8 @@ async def query_project(request: QueryRequest):
             answer
         )
         
+        logger.info(f"🔗 {len(references)} referans bulundu")
+        
         return QueryResponse(
             answer=answer,
             references=references,
@@ -214,6 +353,7 @@ async def query_project(request: QueryRequest):
     except HTTPException:
         raise
     except Exception as e:
+        logger.error(f"❌ Sorgu hatası: {str(e)}", exc_info=True)
         raise HTTPException(status_code=400, detail=f"Sorgu hatası: {str(e)}")
 
 
@@ -228,6 +368,8 @@ async def list_projects():
             "total_files": project_index.total_files,
             "total_elements": len(project_index.elements)
         })
+    
+    logger.info(f"📚 {len(projects)} proje listelendi")
     
     return {"projects": projects}
 
