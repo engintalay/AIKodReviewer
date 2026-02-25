@@ -4,6 +4,13 @@
 
 set -e
 
+# Sanal ortama gir
+if [ ! -d "venv" ]; then
+    echo "❌ venv klasörü bulunamadı. Lütfen ./setup.sh çalıştırın"
+    exit 1
+fi
+source venv/bin/activate
+
 # .env dosyasını yükle
 if [ -f ".env" ]; then
     export $(cat .env | grep -v '^#' | xargs)
@@ -97,7 +104,7 @@ trap cleanup SIGINT SIGTERM
 echo -e "${BLUE}═══════════════════════════════════════════════════════════${NC}"
 echo -e "${BLUE}Backend Başlıyor... (Port ${BACKEND_PORT})${NC}"
 echo -e "${BLUE}═══════════════════════════════════════════════════════════${NC}"
-bash -c "source venv/bin/activate && cd backend && python3 main.py --port ${BACKEND_PORT}" > /tmp/backend.log 2>&1 &
+(cd backend && python3 main.py --port ${BACKEND_PORT}) > /tmp/backend.log 2>&1 &
 BACKEND_PID=$!
 echo $BACKEND_PID >> "$PID_FILE"
 echo -e "${GREEN}Backend PID: $BACKEND_PID${NC}"
@@ -115,7 +122,8 @@ echo ""
 echo -e "${BLUE}═══════════════════════════════════════════════════════════${NC}"
 echo -e "${BLUE}Frontend Başlıyor... (Port ${FRONTEND_PORT})${NC}"
 echo -e "${BLUE}═══════════════════════════════════════════════════════════${NC}"
-bash -c "source venv/bin/activate && export STREAMLIT_SERVER_PORT=${FRONTEND_PORT} && cd frontend && streamlit run app.py --logger.level=warning" > /tmp/frontend.log 2>&1 &
+export STREAMLIT_SERVER_PORT=${FRONTEND_PORT}
+(cd frontend && streamlit run app.py --logger.level=warning) > /tmp/frontend.log 2>&1 &
 FRONTEND_PID=$!
 echo $FRONTEND_PID >> "$PID_FILE"
 echo -e "${GREEN}Frontend PID: $FRONTEND_PID${NC}"
