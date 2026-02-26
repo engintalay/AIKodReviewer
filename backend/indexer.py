@@ -319,49 +319,67 @@ class CodeIndexer:
         self.projects[project_id] = project_index
         return project_id, project_index
     
-    def search_elements(self, project_id: str, query: str) -> List[CodeElement]:
-        """Keyword ile kod elementlerini ara (geliştirilmiş arama)"""
+    def search_elements(self, project_id: str, query: str, search_mode: str = "fast", previous_elements: List[str] = None) -> List[CodeElement]:
+        """Keyword veya derin arama ile kod elementlerini ara"""
         if project_id not in self.projects:
             return []
         
         elements = self.projects[project_id].elements
         query_lower = query.lower()
-        
-        # Sorguyu kelimelere ayır
         query_words = [w.strip() for w in query_lower.split() if len(w.strip()) > 2]
         
         scored_results = []  # [(element, score), ...]
         
+        # Dosya içeriklerini ara (Deep mode)
+        file_content_scores = {} # {file_path: score}
+        if search_mode == "deep" and project_id in self.code_snippets:
+            for file_path, content in self.code_snippets[project_id].items():
+                content_lower = content.lower()
+                f_score = 0
+                for word in query_words:
+                    if word in content_lower:
+                        # Kelimenin geçme sayısı kadar puan ekle
+                        f_score += content_lower.count(word) * 2
+                
+                if f_score > 0:
+                    file_content_scores[file_path] = f_score
+
         for element in elements:
             element_name_lower = element.name.lower()
             element_sig_lower = (element.signature or "").lower()
+            element_file_lower = element.file_path.lower()
             
             score = 0
             
+            # Önceki sohbette bahsedilen elementlere bonus puan
+            if previous_elements and element.name in previous_elements:
+                score += 50
+            
             # Tam eşleşme (en yüksek puan)
-            if query_lower in element_name_lower or query_lower in element_sig_lower:
+            if query_lower in element_name_lower:
+                score += 150
+            elif query_lower in element_sig_lower:
                 score += 100
             
             # Kelime bazlı eşleşme
             for word in query_words:
                 if word in element_name_lower:
-                    score += 10
+                    score += 20
                 if word in element_sig_lower:
+                    score += 10
+                if word in element_file_lower:
                     score += 5
             
-            # Eğer bir puan varsa ekle
+            # Deep mode puanı ekle (dosya içeriğinde bulunuyorsa)
+            if search_mode == "deep" and element.file_path in file_content_scores:
+                score += file_content_scores[element.file_path]
+            
             if score > 0:
                 scored_results.append((element, score))
         
         # Sonuçları puana göre sırala
         scored_results.sort(key=lambda x: -x[1])
         results = [elem for elem, score in scored_results]
-        
-        # Eğer yeterli sonuç yoksa, tüm class'ları da ekle (fallback)
-        if len(results) < 5:
-            for element in elements:
-                if element.type == "class" and element not in results:
-                    results.append(element)
         
         return results
     

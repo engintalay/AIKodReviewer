@@ -14,21 +14,14 @@ logger = logging.getLogger(__name__)
 class LMStudioClient:
     """LMStudio OpenAI-compatible API istemcisi"""
     
-    # Context window limits per model
-    MODEL_CONTEXT_LIMITS = {
-        "mistral-7b-instruct-v0.3": 4096,  # Mistral 7B
-        "llama-2-7b": 4096,
-        "default": 4096
-    }
-    
-    def __init__(self, base_url: str = "http://localhost:8000/v1", model: str = "mistral-7b-instruct-v0.3"):
+    def __init__(self, base_url: str = "http://localhost:8000/v1", model: str = "mistral-7b-instruct-v0.3", context_length: int = 4096):
         self.base_url = base_url
         self.model = model
         self.chat_endpoint = f"{base_url}/chat/completions"
         self.models_endpoint = f"{base_url}/models"
         
         # Model context limit
-        self.max_context_tokens = self.MODEL_CONTEXT_LIMITS.get(model, self.MODEL_CONTEXT_LIMITS["default"])
+        self.max_context_tokens = context_length
         
         # Session setup with connection pooling
         self.session = requests.Session()
@@ -89,7 +82,8 @@ class LMStudioClient:
         code_snippets: List[CodeSnippet],
         max_tokens: int = 500,
         temperature: float = 0.7,
-        max_context_chars: int = 8000
+        max_context_chars: int = 8000,
+        chat_history: List[Dict] = None
     ) -> tuple[str, float]:
         """Kod konteksti ile sorgu yap (kontekst boyutunu kontrol et)"""
         
@@ -97,11 +91,11 @@ class LMStudioClient:
         context = self._build_context(code_snippets, max_context_chars=max_context_chars)
         
         # Prompt'u oluştur
-        prompt = self._build_prompt(question, context)
+        prompt = self._build_prompt(question, context, chat_history)
         
         # API'ya iste gönder
         start_time = time.time()
-        response_text = self._call_api(prompt, max_tokens, temperature)
+        response_text = self._call_api(prompt, max_tokens, temperature, chat_history)
         elapsed_time = time.time() - start_time
         
         return response_text, elapsed_time
@@ -126,11 +120,16 @@ class LMStudioClient:
             snippet_size = len(snippet_header) + len(snippet_text) + 10  # +10 boş satırlar için
             
             if total_chars + snippet_size > max_context_chars:
-                logger.warning(
-                    f"⚠️  Kontekst boyutu sınırına ulaşıldı: {total_chars}/{max_context_chars} karakter. "
-                    f"{len(code_snippets) - len(context_parts)} snippet atlanıyor."
-                )
-                break
+                # Önemli snippet'ları (metadata, summary) atlamadan önce uyar
+                if snippet.file_path in ["PROJECT_METADATA", "ELEMENTS_SUMMARY"]:
+                    # Bu snippet'ları mutlaka ekle
+                    pass
+                else:
+                    logger.warning(
+                        f"⚠️  Kontekst boyutu sınırına ulaşıldı: {total_chars}/{max_context_chars} karakter. "
+                        f"Kalan {len(code_snippets) - len(context_parts)//3} snippet atlanıyor."
+                    )
+                    break
             
             context_parts.append(snippet_header)
             context_parts.append(snippet_text)
@@ -145,7 +144,7 @@ class LMStudioClient:
         
         return context
     
-    def _build_prompt(self, question: str, context: str) -> str:
+    def _build_prompt(self, question: str, context: str, chat_history: List[Dict] = None) -> str:
         """Prompt'u oluştur (token sınırını kontrol et)"""
         
         # Rezerv tokenleri ayır (cevap + buffer)
@@ -156,19 +155,29 @@ class LMStudioClient:
         context_tokens = self._estimate_tokens(context)
         question_tokens = self._estimate_tokens(question)
         
-        total_tokens = context_tokens + question_tokens + 100  # +100 prompt template için
+        # Chat history ekle
+        history_text = ""
+        if chat_history:
+            history_text = "\n\nÖNCEKİ SOHBET:\n"
+            for msg in chat_history[-3:]:  # Son 3 mesaj
+                role = "Kullanıcı" if msg.get("role") == "user" else "Asistan"
+                history_text += f"{role}: {msg.get('content', '')[:200]}\n"
+        
+        history_tokens = self._estimate_tokens(history_text)
+        total_tokens = context_tokens + question_tokens + history_tokens + 100  # +100 prompt template için
         
         if total_tokens > self.max_context_tokens:
             logger.warning(
                 f"⚠️  UYARI: Tahmini token sayısı aşıyor!\n"
                 f"   Kontekst: {context_tokens} token\n"
                 f"   Soru: {question_tokens} token\n"
+                f"   Geçmiş: {history_tokens} token\n"
                 f"   Toplam: {total_tokens} token (Limit: {self.max_context_tokens})\n"
                 f"   → Kontekst otomatik olarak kısaltılıyor..."
             )
         
         if context:
-            prompt = f"""Aşağıdaki kod parçacıklarını ve konteksti dikkate alarak soruya cevap ver.
+            prompt = f"""Aşağıdaki kod parçacıklarını ve konteksti dikkate alarak soruya cevap ver.{history_text}
 
 KONTEKST:
 {context}
@@ -177,7 +186,7 @@ SORU: {question}
 
 CEVAP:"""
         else:
-            prompt = f"""Şu soruya cevap ver:
+            prompt = f"""Şu soruya cevap ver:{history_text}
 
 SORU: {question}
 
@@ -188,23 +197,35 @@ CEVAP:"""
             f"📋 PROMPT OLUŞTURULDU:\n"
             f"   ❓ Soru: {question[:80]}...\n"
             f"   📄 Kontekst: {len(context)} karakter (~{context_tokens} token)\n"
+            f"   💬 Geçmiş: {len(chat_history or [])} mesaj (~{history_tokens} token)\n"
             f"   📊 Toplam: ~{total_tokens}/{self.max_context_tokens} token"
         )
         logger.debug(f"   📝 Full Prompt:\n{prompt[:500]}...")
         
         return prompt
     
-    def _call_api(self, prompt: str, max_tokens: int = 1000, temperature: float = 0.7) -> str:
+    def _call_api(self, prompt: str, max_tokens: int = 1000, temperature: float = 0.7, chat_history: List[Dict] = None) -> str:
         """LMStudio API'sını çağır"""
         try:
+            messages = []
+            
+            # Chat history ekle
+            if chat_history:
+                for msg in chat_history[-3:]:
+                    messages.append({
+                        "role": msg.get("role", "user"),
+                        "content": msg.get("content", "")
+                    })
+            
+            # Mevcut soruyu ekle
+            messages.append({
+                "role": "user",
+                "content": prompt
+            })
+            
             payload = {
                 "model": self.model,
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": prompt
-                    }
-                ],
+                "messages": messages,
                 "temperature": temperature,
                 "max_tokens": max_tokens,
                 "stream": False

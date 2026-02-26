@@ -28,12 +28,16 @@ if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 if "project_info" not in st.session_state:
     st.session_state.project_info = None
+if "username" not in st.session_state:
+    st.session_state.username = None
+if "saved_projects" not in st.session_state:
+    st.session_state.saved_projects = []
 
 
 def check_backend_health():
     """Backend sağlığını kontrol et"""
     try:
-        response = requests.get(f"{BACKEND_URL}/health", timeout=5)
+        response = requests.get(f"{BACKEND_URL}/health", timeout=2)
         return response.status_code == 200
     except:
         return False
@@ -66,7 +70,7 @@ def upload_project(uploaded_file):
         st.error(f"❌ Hata: {str(e)}")
 
 
-def query_project(question):
+def query_project(question, search_mode="fast"):
     """Projeye soru sor"""
     try:
         with st.spinner("Sorgu işleniyor..."):
@@ -75,7 +79,9 @@ def query_project(question):
                 json={
                     "project_id": st.session_state.project_id,
                     "question": question,
-                    "include_snippets": True
+                    "search_mode": search_mode,
+                    "include_snippets": True,
+                    "chat_history": st.session_state.chat_history
                 }
             )
             
@@ -95,6 +101,43 @@ def query_project(question):
 with st.sidebar:
     st.header("📋 Proje Yöneticisi")
     
+    # Kullanıcı girişi
+    if not st.session_state.username:
+        st.subheader("🔐 Giriş Yap")
+        username = st.text_input("Kullanıcı adı:")
+        password = st.text_input("Şifre:", type="password")
+        
+        if st.button("Giriş"):
+            if username and password:
+                try:
+                    response = requests.post(
+                        f"{BACKEND_URL}/login",
+                        json={"username": username, "password": password},
+                        timeout=5
+                    )
+                    if response.status_code == 200:
+                        st.session_state.username = username
+                        st.success("✅ Giriş başarılı!")
+                        st.rerun()
+                    else:
+                        st.error(f"❌ {response.json().get('detail', 'Giriş başarısız')}")
+                except Exception as e:
+                    st.error(f"❌ Hata: {e}")
+            else:
+                st.warning("Kullanıcı adı ve şifre girin")
+        
+        st.stop()
+    
+    # Kullanıcı bilgisi
+    st.success(f"👤 {st.session_state.username}")
+    if st.button("🚪 Çıkış"):
+        st.session_state.username = None
+        st.session_state.project_id = None
+        st.session_state.saved_projects = []
+        st.rerun()
+    
+    st.divider()
+    
     # Backend durumu
     backend_ok = check_backend_health()
     if backend_ok:
@@ -102,6 +145,43 @@ with st.sidebar:
     else:
         st.error("❌ Backend bağlanılamadı")
         st.info(f"Lütfen backend'i başlatın: `python backend/main.py`")
+    
+    st.divider()
+    
+    # Kayıtlı projeler
+    st.subheader("💾 Kayıtlı Projeler")
+    
+    if st.button("🔄 Yenile"):
+        st.session_state.saved_projects = []
+    
+    if not st.session_state.saved_projects:
+        try:
+            response = requests.get(f"{BACKEND_URL}/saved_projects/{st.session_state.username}", timeout=3)
+            if response.status_code == 200:
+                st.session_state.saved_projects = response.json()["projects"]
+        except:
+            pass
+    
+    if st.session_state.saved_projects:
+        for proj in st.session_state.saved_projects:
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                st.write(f"{'🔒' if proj['is_private'] else '🌐'} {proj['project_name']}")
+            with col2:
+                if st.button("📂", key=f"load_{proj['project_id']}"):
+                    load_response = requests.post(f"{BACKEND_URL}/load_project/{proj['project_id']}", timeout=10)
+                    if load_response.status_code == 200:
+                        data = load_response.json()
+                        st.session_state.project_id = proj['project_id']
+                        st.session_state.project_info = {
+                            "total_elements": proj['metadata']['total_elements'],
+                            "languages_detected": proj['metadata']['languages'],
+                            "message": f"{proj['metadata']['total_elements']} element"
+                        }
+                        st.success(f"✅ {proj['project_name']} yüklendi")
+                        st.rerun()
+    else:
+        st.info("Henüz kayıtlı proje yok")
     
     st.divider()
     
@@ -178,6 +258,34 @@ with st.sidebar:
             st.write(", ".join(info["languages_detected"]))
         
         st.warning(f"**Proje ID:** `{st.session_state.project_id[:12]}`")
+        
+        # Projeyi kaydet
+        with st.expander("💾 Projeyi Kaydet"):
+            project_name = st.text_input("Proje adı:")
+            is_private = st.checkbox("Özel proje (sadece sen görebilirsin)")
+            
+            if st.button("Kaydet"):
+                if project_name:
+                    try:
+                        response = requests.post(
+                            f"{BACKEND_URL}/save_project",
+                            json={
+                                "project_id": st.session_state.project_id,
+                                "username": st.session_state.username,
+                                "project_name": project_name,
+                                "is_private": is_private
+                            },
+                            timeout=5
+                        )
+                        if response.status_code == 200:
+                            st.success("✅ Proje kaydedildi!")
+                            st.session_state.saved_projects = []  # Cache'i temizle
+                        else:
+                            st.error(f"❌ {response.json().get('detail', 'Kaydetme başarısız')}")
+                    except Exception as e:
+                        st.error(f"❌ Hata: {e}")
+                else:
+                    st.warning("Proje adı girin")
     
     st.divider()
     
@@ -262,6 +370,15 @@ else:
                                 f"📍 Satır: {ref['lines'][0]}-{ref['lines'][1]}"
                             )
     
+    # Arama Kalitesi Seçimi
+    search_mode_label = st.radio(
+        "🔍 Arama Kalitesi:",
+        options=["Hızlı Arama", "Derin Arama"],
+        horizontal=True,
+        help="Hızlı Arama: Sadece fonksiyon ve sınıfları tarar. Derin Arama: Tüm dosya içeriklerini tarar (daha yavaş)."
+    )
+    search_mode = "fast" if search_mode_label == "Hızlı Arama" else "deep"
+    
     # Sorgu input
     question = st.chat_input("Sorunuzu yazın...")
     
@@ -276,7 +393,7 @@ else:
             st.write(question)
         
         # Cevap al
-        result = query_project(question)
+        result = query_project(question, search_mode=search_mode)
         
         if result:
             with st.chat_message("assistant"):
@@ -291,6 +408,25 @@ else:
                                 f"📄 `{ref['file']}`\n\n"
                                 f"📍 Satır: {ref['lines'][0]}-{ref['lines'][1]}"
                             )
+                            
+                            # Kod içeriğini göster
+                            try:
+                                response = requests.post(
+                                    f"{BACKEND_URL}/get_snippet",
+                                    json={
+                                        "project_id": st.session_state.project_id,
+                                        "file_path": ref['file'],
+                                        "start_line": ref['lines'][0],
+                                        "end_line": ref['lines'][1]
+                                    }
+                                )
+                                if response.status_code == 200:
+                                    snippet_data = response.json()
+                                    st.code(snippet_data['code'], language='java')
+                            except:
+                                pass
+                            
+                            st.divider()
                 
                 # Geçmişe ekle
                 st.session_state.chat_history.append({

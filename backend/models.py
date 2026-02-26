@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Optional, List, Dict
 
 
 class CodeElement(BaseModel):
@@ -36,7 +36,9 @@ class QueryRequest(BaseModel):
     """Sorgu İsteği Modeli"""
     project_id: str
     question: str
+    search_mode: str = "fast"  # "fast" veya "deep"
     include_snippets: bool = True
+    chat_history: List[Dict] = []
 
 
 class QueryResponse(BaseModel):
@@ -53,6 +55,20 @@ class UploadResponse(BaseModel):
     status: str
     message: str
     file_count: int
+
+
+class SaveProjectRequest(BaseModel):
+    """Proje kaydetme isteği"""
+    project_id: str
+    username: str
+    project_name: str
+    is_private: bool = False
+
+
+class LoginRequest(BaseModel):
+    """Giriş isteği"""
+    username: str
+    password: str
 
 
 class AnalysisResponse(BaseModel):

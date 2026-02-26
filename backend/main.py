@@ -26,10 +26,12 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 from models import (
-    UploadResponse, AnalysisResponse, QueryRequest, QueryResponse, CodeSnippet
+    UploadResponse, AnalysisResponse, QueryRequest, QueryResponse, CodeSnippet,
+    SaveProjectRequest, LoginRequest
 )
 from indexer import CodeIndexer
 from llm_client import LMStudioClient
+from storage import Storage
 
 
 # Request Logging Middleware
@@ -115,10 +117,12 @@ BACKEND_HOST = os.getenv("BACKEND_HOST", "0.0.0.0")
 BACKEND_PORT = int(os.getenv("BACKEND_PORT", 5000))
 LMSTUDIO_BASE_URL = os.getenv("LMSTUDIO_BASE_URL", "http://localhost:8000/v1")
 LMSTUDIO_MODEL = os.getenv("LMSTUDIO_MODEL", "mistral-7b-instruct-v0.3")
+LMSTUDIO_CONTEXT_LENGTH = int(os.getenv("LMSTUDIO_CONTEXT_LENGTH", 4096))
 
 # Global nesneler
 indexer = CodeIndexer()
-llm_client = LMStudioClient(base_url=LMSTUDIO_BASE_URL, model=LMSTUDIO_MODEL)
+llm_client = LMStudioClient(base_url=LMSTUDIO_BASE_URL, model=LMSTUDIO_MODEL, context_length=LMSTUDIO_CONTEXT_LENGTH)
+storage = Storage()
 
 # Yüklenen projelerin geçici depolama yolları
 UPLOAD_DIR = tempfile.mkdtemp(prefix="aikodreviewer_")
@@ -311,9 +315,20 @@ async def query_project(request: QueryRequest):
             f"Kod elemani sayisi (dillere gore): {lang_summary}\n"
         )
 
-        # İlgili kod elementlerini ara
-        relevant_elements = indexer.search_elements(request.project_id, request.question)
-        logger.info(f"🔎 {len(relevant_elements)} ilgili kod elemanı bulundu")
+        # İlgili kod elementlerini ara (önceki sohbetten context ile)
+        previous_elements = []
+        if request.chat_history:
+            for msg in request.chat_history[-2:]:
+                if msg.get("references"):
+                    previous_elements.extend([ref.get("element") for ref in msg.get("references", [])])
+        
+        relevant_elements = indexer.search_elements(
+            request.project_id, 
+            request.question, 
+            search_mode=request.search_mode, 
+            previous_elements=previous_elements
+        )
+        logger.info(f"🔎 {len(relevant_elements)} ilgili kod elemanı bulundu (Mode: {request.search_mode})")
         
         # Kod snippet'larını topla (kontekst boyutunu kontrol etmeyi etkinleştir)
         code_snippets = [
@@ -326,9 +341,24 @@ async def query_project(request: QueryRequest):
             )
         ]
         
-        # En fazla 5 element göndermek için (context size kontrolü için)
-        # Not: llm_client._build_context() 8000 karakter limitiyle çalışır
-        for element in relevant_elements[:5]:  # 15 → 5 (Context window aşmasını engelle)
+        # İlgili elementlerin listesini ekle (snippet olmadan)
+        if relevant_elements:
+            elements_summary = "İLGİLİ KOD ELEMENTLERİ:\n"
+            for i, elem in enumerate(relevant_elements[:20], 1):
+                elements_summary += f"{i}. {elem.name} ({elem.type}) - {elem.file_path.split('/')[-1]}\n"
+            if len(relevant_elements) > 20:
+                elements_summary += f"... ve {len(relevant_elements) - 20} element daha\n"
+            
+            code_snippets.append(CodeSnippet(
+                file_path="ELEMENTS_SUMMARY",
+                start_line=1,
+                end_line=1,
+                code=elements_summary,
+                element_name="elements_summary"
+            ))
+        
+        # En fazla 3 element snippet göndermek için (context size kontrolü için)
+        for element in relevant_elements[:3]:
             snippet = indexer.get_code_snippet(
                 request.project_id,
                 element.file_path,
@@ -345,8 +375,9 @@ async def query_project(request: QueryRequest):
         answer, processing_time = llm_client.query_with_context(
             request.question,
             code_snippets,
-            max_tokens=500,  # Azalt (1000 → 500)
-            max_context_chars=8000  # Kontekst sınırı
+            max_tokens=500,
+            max_context_chars=8000,
+            chat_history=request.chat_history
         )
         
         logger.info(f"✅ LMStudio cevap verdi ({processing_time:.2f}s)")
@@ -400,6 +431,126 @@ async def list_projects():
     logger.info(f"📚 {len(projects)} proje listelendi")
     
     return {"projects": projects}
+
+
+@app.post("/get_snippet")
+async def get_snippet(request: dict):
+    """Kod snippet'ını getir"""
+    try:
+        project_id = request.get("project_id")
+        file_path = request.get("file_path")
+        start_line = request.get("start_line")
+        end_line = request.get("end_line")
+        
+        if not all([project_id, file_path, start_line, end_line]):
+            raise HTTPException(status_code=400, detail="Eksik parametreler")
+        
+        snippet = indexer.get_code_snippet(project_id, file_path, start_line, end_line)
+        
+        if not snippet:
+            raise HTTPException(status_code=404, detail="Snippet bulunamadı")
+        
+        return {
+            "code": snippet.code,
+            "file_path": snippet.file_path,
+            "start_line": snippet.start_line,
+            "end_line": snippet.end_line
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Snippet hatası: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=400, detail=f"Snippet hatası: {str(e)}")
+
+
+@app.post("/login")
+async def login(request: LoginRequest):
+    """Kullanıcı girişi"""
+    # Önce kullanıcı var mı kontrol et
+    if storage.verify_user(request.username, request.password):
+        return {"status": "success", "username": request.username}
+    
+    # Kullanıcı yoksa, şifre ile yeni kullanıcı oluştur
+    users = json.loads(storage.USERS_FILE.read_text())
+    if request.username not in users:
+        if storage.create_user(request.username, request.password):
+            logger.info(f"👤 Yeni kullanıcı: {request.username}")
+            return {"status": "success", "username": request.username, "new_user": True}
+    
+    raise HTTPException(status_code=401, detail="Şifre yanlış")
+
+
+@app.post("/save_project")
+async def save_project(request: SaveProjectRequest):
+    """Projeyi kaydet"""
+    try:
+        if request.project_id not in indexer.projects:
+            raise HTTPException(status_code=404, detail="Proje bulunamadı")
+        
+        project_index = indexer.get_project_index(request.project_id)
+        project_path = PROJECT_STORE.get(request.project_id, "")
+        
+        storage.save_project(
+            request.project_id,
+            request.username,
+            request.project_name,
+            project_path,
+            request.is_private,
+            {
+                "total_files": project_index.total_files,
+                "supported_files": project_index.supported_files,
+                "languages": project_index.languages,
+                "total_elements": len(project_index.elements)
+            }
+        )
+        
+        logger.info(f"💾 Proje kaydedildi: {request.project_name} (User: {request.username}, ID: {request.project_id})")
+        return {"status": "success", "message": "Proje kaydedildi"}
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Kaydetme hatası: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=400, detail=f"Kaydetme hatası: {str(e)}")
+
+
+@app.get("/saved_projects/{username}")
+async def get_saved_projects(username: str):
+    """Kullanıcının kayıtlı projelerini getir"""
+    projects = storage.get_user_projects(username)
+    return {"projects": projects}
+
+
+@app.post("/load_project/{project_id}")
+async def load_project(project_id: str):
+    """Kayıtlı projeyi yükle"""
+    try:
+        project_data = storage.get_project(project_id)
+        if not project_data:
+            raise HTTPException(status_code=404, detail="Proje bulunamadı")
+        
+        project_path = project_data["project_path"]
+        if not os.path.exists(project_path):
+            raise HTTPException(status_code=404, detail="Proje dosyaları bulunamadı")
+        
+        # Projeyi indexle
+        _, project_index = indexer.index_project(project_path)
+        PROJECT_STORE[project_id] = project_path
+        
+        logger.info(f"📂 Proje yüklendi: {project_data['project_name']}")
+        return {
+            "status": "success",
+            "project_id": project_id,
+            "project_name": project_data["project_name"],
+            "metadata": project_data["metadata"]
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Yükleme hatası: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=400, detail=f"Yükleme hatası: {str(e)}")
 
 
 if __name__ == "__main__":
