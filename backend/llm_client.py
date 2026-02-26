@@ -14,11 +14,21 @@ logger = logging.getLogger(__name__)
 class LMStudioClient:
     """LMStudio OpenAI-compatible API istemcisi"""
     
+    # Context window limits per model
+    MODEL_CONTEXT_LIMITS = {
+        "mistral-7b-instruct-v0.3": 4096,  # Mistral 7B
+        "llama-2-7b": 4096,
+        "default": 4096
+    }
+    
     def __init__(self, base_url: str = "http://localhost:8000/v1", model: str = "mistral-7b-instruct-v0.3"):
         self.base_url = base_url
         self.model = model
         self.chat_endpoint = f"{base_url}/chat/completions"
         self.models_endpoint = f"{base_url}/models"
+        
+        # Model context limit
+        self.max_context_tokens = self.MODEL_CONTEXT_LIMITS.get(model, self.MODEL_CONTEXT_LIMITS["default"])
         
         # Session setup with connection pooling
         self.session = requests.Session()
@@ -77,13 +87,14 @@ class LMStudioClient:
         self, 
         question: str, 
         code_snippets: List[CodeSnippet],
-        max_tokens: int = 1000,
-        temperature: float = 0.7
+        max_tokens: int = 500,
+        temperature: float = 0.7,
+        max_context_chars: int = 8000
     ) -> tuple[str, float]:
-        """Kod konteksti ile sorgu yap"""
+        """Kod konteksti ile sorgu yap (kontekst boyutunu kontrol et)"""
         
-        # Konteksti hazırla
-        context = self._build_context(code_snippets)
+        # Konteksti hazırla (maksimum 8000 karakter)
+        context = self._build_context(code_snippets, max_context_chars=max_context_chars)
         
         # Prompt'u oluştur
         prompt = self._build_prompt(question, context)
@@ -95,21 +106,66 @@ class LMStudioClient:
         
         return response_text, elapsed_time
     
-    def _build_context(self, code_snippets: List[CodeSnippet]) -> str:
-        """Kod parçacıklarından kontekst oluştur"""
+    def _estimate_tokens(self, text: str) -> int:
+        """Basit token tahmini (1 token ≈ 4 karakter)"""
+        return max(1, len(text) // 4)
+    
+    def _build_context(self, code_snippets: List[CodeSnippet], max_context_chars: int = 10000) -> str:
+        """Kod parçacıklarından kontekst oluştur (kontekst boyutunu sınırla)"""
         if not code_snippets:
             return ""
         
         context_parts = []
-        for snippet in code_snippets:
-            context_parts.append(f"--- File: {snippet.file_path} (Lines {snippet.start_line}-{snippet.end_line}) ---")
-            context_parts.append(snippet.code)
-            context_parts.append("")
+        total_chars = 0
         
-        return "\n".join(context_parts)
+        for snippet in code_snippets:
+            snippet_header = f"--- File: {snippet.file_path} (Lines {snippet.start_line}-{snippet.end_line}) ---\n"
+            snippet_text = snippet.code
+            
+            # Kontekst sınırını aşıyor mu kontrol et
+            snippet_size = len(snippet_header) + len(snippet_text) + 10  # +10 boş satırlar için
+            
+            if total_chars + snippet_size > max_context_chars:
+                logger.warning(
+                    f"⚠️  Kontekst boyutu sınırına ulaşıldı: {total_chars}/{max_context_chars} karakter. "
+                    f"{len(code_snippets) - len(context_parts)} snippet atlanıyor."
+                )
+                break
+            
+            context_parts.append(snippet_header)
+            context_parts.append(snippet_text)
+            context_parts.append("")
+            total_chars += snippet_size
+        
+        context = "\n".join(context_parts)
+        logger.info(
+            f"📦 Kontekst hazırlandı: {len(context_parts)//3} snippet, "
+            f"{len(context)} karakter (~{self._estimate_tokens(context)} token)"
+        )
+        
+        return context
     
     def _build_prompt(self, question: str, context: str) -> str:
-        """Prompt'u oluştur"""
+        """Prompt'u oluştur (token sınırını kontrol et)"""
+        
+        # Rezerv tokenleri ayır (cevap + buffer)
+        reserved_tokens = 500  # Cevap için
+        available_tokens = self.max_context_tokens - reserved_tokens
+        
+        # Kontekst tokenlerini kontrol et
+        context_tokens = self._estimate_tokens(context)
+        question_tokens = self._estimate_tokens(question)
+        
+        total_tokens = context_tokens + question_tokens + 100  # +100 prompt template için
+        
+        if total_tokens > self.max_context_tokens:
+            logger.warning(
+                f"⚠️  UYARI: Tahmini token sayısı aşıyor!\n"
+                f"   Kontekst: {context_tokens} token\n"
+                f"   Soru: {question_tokens} token\n"
+                f"   Toplam: {total_tokens} token (Limit: {self.max_context_tokens})\n"
+                f"   → Kontekst otomatik olarak kısaltılıyor..."
+            )
         
         if context:
             prompt = f"""Aşağıdaki kod parçacıklarını ve konteksti dikkate alarak soruya cevap ver.
@@ -131,7 +187,8 @@ CEVAP:"""
         logger.info(
             f"📋 PROMPT OLUŞTURULDU:\n"
             f"   ❓ Soru: {question[:80]}...\n"
-            f"   📄 Kontekst: {len(context)} karakter"
+            f"   📄 Kontekst: {len(context)} karakter (~{context_tokens} token)\n"
+            f"   📊 Toplam: ~{total_tokens}/{self.max_context_tokens} token"
         )
         logger.debug(f"   📝 Full Prompt:\n{prompt[:500]}...")
         

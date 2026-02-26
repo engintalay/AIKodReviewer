@@ -315,7 +315,7 @@ async def query_project(request: QueryRequest):
         relevant_elements = indexer.search_elements(request.project_id, request.question)
         logger.info(f"🔎 {len(relevant_elements)} ilgili kod elemanı bulundu")
         
-        # Kod snippet'larını topla (daha fazla snippet)
+        # Kod snippet'larını topla (kontekst boyutunu kontrol etmeyi etkinleştir)
         code_snippets = [
             CodeSnippet(
                 file_path="PROJECT_METADATA",
@@ -326,8 +326,9 @@ async def query_project(request: QueryRequest):
             )
         ]
         
-        # En fazla 15 element göndermek için
-        for element in relevant_elements[:15]:
+        # En fazla 5 element göndermek için (context size kontrolü için)
+        # Not: llm_client._build_context() 8000 karakter limitiyle çalışır
+        for element in relevant_elements[:5]:  # 15 → 5 (Context window aşmasını engelle)
             snippet = indexer.get_code_snippet(
                 request.project_id,
                 element.file_path,
@@ -339,11 +340,13 @@ async def query_project(request: QueryRequest):
         
         logger.info(f"📝 {len(code_snippets)} kod snippet'ı toplandı")
         
-        # LMStudio'ya soru sor
+        # LMStudio'ya soru sor (context kontrolü ile)
         logger.info("🤖 LMStudio'ya sorgu gönderiliyor...")
         answer, processing_time = llm_client.query_with_context(
             request.question,
-            code_snippets
+            code_snippets,
+            max_tokens=500,  # Azalt (1000 → 500)
+            max_context_chars=8000  # Kontekst sınırı
         )
         
         logger.info(f"✅ LMStudio cevap verdi ({processing_time:.2f}s)")
