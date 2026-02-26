@@ -32,6 +32,7 @@ from models import (
 from indexer import CodeIndexer
 from llm_client import LMStudioClient
 from storage import Storage
+from vector_store import VectorStore
 
 
 # Request Logging Middleware
@@ -123,6 +124,7 @@ LMSTUDIO_CONTEXT_LENGTH = int(os.getenv("LMSTUDIO_CONTEXT_LENGTH", 4096))
 indexer = CodeIndexer()
 llm_client = LMStudioClient(base_url=LMSTUDIO_BASE_URL, model=LMSTUDIO_MODEL, context_length=LMSTUDIO_CONTEXT_LENGTH)
 storage = Storage()
+vector_store = VectorStore()
 
 # Yüklenen projelerin geçici depolama yolları
 UPLOAD_DIR = tempfile.mkdtemp(prefix="aikodreviewer_")
@@ -231,6 +233,15 @@ async def upload_project(file: UploadFile = File(...)):
         project_id, project_index = indexer.index_project(extract_dir)
         PROJECT_STORE[project_id] = extract_dir
         
+        # Vector DB'ye indexle
+        logger.info(f"🧠 Vector DB'ye indeksleniyor...")
+        vector_store.index_project(
+            project_id, 
+            project_index.elements,
+            indexer.code_snippets.get(project_id, {})
+        )
+        logger.info(f"✅ Vector DB indeksleme tamamlandı")
+        
         logger.info(
             f"✅ Yükleme başarılı!\n"
             f"   📋 Project ID: {project_id}\n"
@@ -322,13 +333,43 @@ async def query_project(request: QueryRequest):
                 if msg.get("references"):
                     previous_elements.extend([ref.get("element") for ref in msg.get("references", [])])
         
-        relevant_elements = indexer.search_elements(
-            request.project_id, 
-            request.question, 
-            search_mode=request.search_mode, 
-            previous_elements=previous_elements
-        )
-        logger.info(f"🔎 {len(relevant_elements)} ilgili kod elemanı bulundu (Mode: {request.search_mode})")
+        # Vector search ile semantic arama
+        logger.info("🔍 Vector search yapılıyor...")
+        vector_results = vector_store.search(request.project_id, request.question, n_results=5)
+        
+        all_elements_data = []
+        
+        if vector_results:
+            main_element_name = vector_results[0]['metadata']['name']
+            logger.info(f"🎯 Ana element: {main_element_name}")
+            
+            # Ana element ve bağımlılıklarını getir
+            deps_chain = vector_store.get_element_with_dependencies(
+                request.project_id, 
+                main_element_name, 
+                max_depth=2
+            )
+            logger.info(f"🔗 {len(deps_chain)} element (bağımlılıklarla) bulundu")
+            all_elements_data = deps_chain
+        else:
+            # Fallback: keyword search
+            logger.info("⚠️ Vector search sonuç vermedi")
+            relevant_elements = indexer.search_elements(
+                request.project_id, 
+                request.question, 
+                search_mode=request.search_mode, 
+                previous_elements=previous_elements
+            )
+            all_elements_data = [{"metadata": {
+                "name": e.name,
+                "type": e.type,
+                "file_path": e.file_path,
+                "start_line": e.start_line,
+                "end_line": e.end_line,
+                "dependencies": ""
+            }, "depth": 0} for e in relevant_elements[:5]]
+        
+        logger.info(f"🔎 Toplam {len(all_elements_data)} kod elemanı bulundu")
         
         # Kod snippet'larını topla (kontekst boyutunu kontrol etmeyi etkinleştir)
         code_snippets = [
@@ -386,13 +427,13 @@ async def query_project(request: QueryRequest):
         # Referansları çıkart
         element_dicts = [
             {
-                "name": e.name,
-                "file_path": e.file_path,
-                "type": e.type,
-                "start_line": e.start_line,
-                "end_line": e.end_line
+                "name": e['metadata']['name'],
+                "file_path": e['metadata']['file_path'],
+                "type": e['metadata']['type'],
+                "start_line": e['metadata']['start_line'],
+                "end_line": e['metadata']['end_line']
             }
-            for e in relevant_elements
+            for e in all_elements_data
         ]
         references = llm_client.extract_references_from_response(
             request.question,
