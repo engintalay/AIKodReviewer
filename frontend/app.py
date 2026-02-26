@@ -206,6 +206,40 @@ if not st.session_state.project_id:
     - 🔍 **Kaynakça**: Her cevaba referans eklenmesi
     """)
 else:
+    # Seçili proje bilgisini başında göster
+    col1, col2, col3 = st.columns([2, 1, 1])
+    
+    with col1:
+        st.markdown(f"### 📂 Seçili Proje")
+        st.markdown(f"**ID:** `{st.session_state.project_id}`")
+    
+    with col2:
+        if st.session_state.project_info:
+            info = st.session_state.project_info
+            st.metric("📊 Elemanlar", info["total_elements"])
+    
+    with col3:
+        if st.session_state.project_info:
+            info = st.session_state.project_info
+            st.metric("🗣️ Diller", len(info["languages_detected"]))
+    
+    # Proje detayları
+    if st.session_state.project_info:
+        with st.expander("📋 Proje Detayları"):
+            info = st.session_state.project_info
+            col1, col2 = st.columns(2)
+            with col1:
+                st.write("**Desteklenen Diller:**")
+                for lang in info["languages_detected"]:
+                    st.write(f"  • {lang.upper()}")
+            with col2:
+                st.write("**Proje İstatistikleri:**")
+                st.write(f"  • Toplam elemanlar: {info['total_elements']}")
+                st.write(f"  • Dil sayısı: {len(info['languages_detected'])}")
+                st.write(f"  • Mesaj: {info['message']}")
+    
+    st.divider()
+    
     # Chat arayüzü
     st.subheader("💬 Kod Hakkında Sor")
     
