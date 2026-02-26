@@ -1,10 +1,14 @@
 import requests
 import json
 import time
+import logging
 from typing import List, Dict, Optional
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 from models import CodeSnippet
+
+# Logger
+logger = logging.getLogger(__name__)
 
 
 class LMStudioClient:
@@ -123,6 +127,14 @@ SORU: {question}
 
 CEVAP:"""
         
+        # Prompt'u log et
+        logger.info(
+            f"📋 PROMPT OLUŞTURULDU:\n"
+            f"   ❓ Soru: {question[:80]}...\n"
+            f"   📄 Kontekst: {len(context)} karakter"
+        )
+        logger.debug(f"   📝 Full Prompt:\n{prompt[:500]}...")
+        
         return prompt
     
     def _call_api(self, prompt: str, max_tokens: int = 1000, temperature: float = 0.7) -> str:
@@ -141,6 +153,16 @@ CEVAP:"""
                 "stream": False
             }
             
+            # Payload'ı log et
+            logger.info(
+                f"🔗 LMStudio API ÇAĞRISI:\n"
+                f"   📍 URL: {self.chat_endpoint}\n"
+                f"   🎯 Model: {self.model}\n"
+                f"   🌡️  Temperature: {temperature}\n"
+                f"   📏 Max Tokens: {max_tokens}"
+            )
+            logger.debug(f"   📦 Payload: {json.dumps(payload, indent=2, ensure_ascii=False)[:1000]}")
+            
             response = self.session.post(
                 self.chat_endpoint,
                 json=payload,
@@ -150,16 +172,27 @@ CEVAP:"""
             if response.status_code == 200:
                 data = response.json()
                 if "choices" in data and len(data["choices"]) > 0:
-                    return data["choices"][0]["message"]["content"]
+                    response_content = data["choices"][0]["message"]["content"]
+                    logger.info(f"✅ API Cevaplandı (Status: {response.status_code})")
+                    logger.debug(f"   📤 Response: {response_content[:300]}...")
+                    return response_content
             else:
-                return f"API Hatası: {response.status_code} - {response.text}"
+                error_msg = f"API Hatası: {response.status_code} - {response.text}"
+                logger.error(f"❌ {error_msg}")
+                return error_msg
         
         except requests.exceptions.Timeout:
-            return "❌ Hata: Sorgu zaman aşımı (Timeout - 120 saniye)"
+            error_msg = "❌ Hata: Sorgu zaman aşımı (Timeout - 120 saniye)"
+            logger.error(error_msg)
+            return error_msg
         except requests.exceptions.ConnectionError:
-            return "❌ Hata: LMStudio'ya bağlanılamıyor. Lütfen LMStudio'yu başlattığınızdan emin olun."
+            error_msg = "❌ Hata: LMStudio'ya bağlanılamıyor. Lütfen LMStudio'yu başlattığınızdan emin olun."
+            logger.error(error_msg)
+            return error_msg
         except Exception as e:
-            return f"❌ Hata: {str(e)}"
+            error_msg = f"❌ Hata: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            return error_msg
     
     def extract_references_from_response(
         self,

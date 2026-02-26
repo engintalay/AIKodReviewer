@@ -127,7 +127,7 @@ echo -e "${BLUE}═════════════════════�
 echo -e "${BLUE}Frontend Başlıyor... (Port ${FRONTEND_PORT})${NC}"
 echo -e "${BLUE}═══════════════════════════════════════════════════════════${NC}"
 export STREAMLIT_SERVER_PORT=${FRONTEND_PORT}
-(cd frontend && streamlit run app.py --logger.level=warning) > /tmp/frontend.log 2>&1 &
+(cd frontend && streamlit run app.py --logger.level=warning --server.headless true) > /tmp/frontend.log 2>&1 &
 FRONTEND_PID=$!
 echo $FRONTEND_PID >> "$PID_FILE"
 echo -e "${GREEN}Frontend PID: $FRONTEND_PID${NC}"

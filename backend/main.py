@@ -26,7 +26,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 from models import (
-    UploadResponse, AnalysisResponse, QueryRequest, QueryResponse
+    UploadResponse, AnalysisResponse, QueryRequest, QueryResponse, CodeSnippet
 )
 from indexer import CodeIndexer
 from llm_client import LMStudioClient
@@ -295,12 +295,36 @@ async def query_project(request: QueryRequest):
             logger.error(f"❌ Proje bulunamadı: {request.project_id}")
             raise HTTPException(status_code=404, detail="Proje bulunamadı")
         
+        # Proje bilgisini hazırla (dil ve eleman sayıları)
+        project_index = indexer.get_project_index(request.project_id)
+        lang_counts = {}
+        for element in project_index.elements:
+            lang_counts[element.language] = lang_counts.get(element.language, 0) + 1
+        lang_summary = ", ".join(
+            f"{lang}:{count}" for lang, count in sorted(lang_counts.items(), key=lambda x: -x[1])
+        )
+        project_meta = (
+            "PROJE BILGISI:\n"
+            f"Toplam dosya: {project_index.total_files}\n"
+            f"Desteklenen dosya: {project_index.supported_files}\n"
+            f"Diller: {', '.join(project_index.languages)}\n"
+            f"Kod elemani sayisi (dillere gore): {lang_summary}\n"
+        )
+
         # İlgili kod elementlerini ara
         relevant_elements = indexer.search_elements(request.project_id, request.question)
         logger.info(f"🔎 {len(relevant_elements)} ilgili kod elemanı bulundu")
         
         # Kod snippet'larını topla
-        code_snippets = []
+        code_snippets = [
+            CodeSnippet(
+                file_path="PROJECT_METADATA",
+                start_line=1,
+                end_line=1,
+                code=project_meta,
+                element_name="project_metadata"
+            )
+        ]
         for element in relevant_elements[:5]:  # En fazla 5 element
             snippet = indexer.get_code_snippet(
                 request.project_id,
@@ -324,7 +348,6 @@ async def query_project(request: QueryRequest):
         logger.info(f"📢 Cevap: {answer[:150]}...")
         
         # Referansları çıkart
-        project_index = indexer.get_project_index(request.project_id)
         element_dicts = [
             {
                 "name": e.name,
