@@ -315,7 +315,7 @@ async def query_project(request: QueryRequest):
         relevant_elements = indexer.search_elements(request.project_id, request.question)
         logger.info(f"🔎 {len(relevant_elements)} ilgili kod elemanı bulundu")
         
-        # Kod snippet'larını topla
+        # Kod snippet'larını topla (daha fazla snippet)
         code_snippets = [
             CodeSnippet(
                 file_path="PROJECT_METADATA",
@@ -325,7 +325,9 @@ async def query_project(request: QueryRequest):
                 element_name="project_metadata"
             )
         ]
-        for element in relevant_elements[:5]:  # En fazla 5 element
+        
+        # En fazla 15 element göndermek için
+        for element in relevant_elements[:15]:
             snippet = indexer.get_code_snippet(
                 request.project_id,
                 element.file_path,

@@ -320,18 +320,49 @@ class CodeIndexer:
         return project_id, project_index
     
     def search_elements(self, project_id: str, query: str) -> List[CodeElement]:
-        """Keyword ile kod elementlerini ara"""
+        """Keyword ile kod elementlerini ara (geliştirilmiş arama)"""
         if project_id not in self.projects:
             return []
         
         elements = self.projects[project_id].elements
         query_lower = query.lower()
         
+        # Sorguyu kelimelere ayır
+        query_words = [w.strip() for w in query_lower.split() if len(w.strip()) > 2]
+        
         results = []
+        scored_results = {}  # {element: score}
+        
         for element in elements:
-            if (query_lower in element.name.lower() or 
-                query_lower in (element.signature or "").lower()):
-                results.append(element)
+            element_name_lower = element.name.lower()
+            element_sig_lower = (element.signature or "").lower()
+            
+            score = 0
+            
+            # Tam eşleşme (en yüksek puan)
+            if query_lower in element_name_lower or query_lower in element_sig_lower:
+                score += 100
+            
+            # Kelime bazlı eşleşme
+            for word in query_words:
+                if word in element_name_lower:
+                    score += 10
+                if word in element_sig_lower:
+                    score += 5
+            
+            # Eğer bir puan varsa ekle
+            if score > 0:
+                scored_results[element] = score
+        
+        # Sonuçları puana göre sırala
+        sorted_results = sorted(scored_results.items(), key=lambda x: -x[1])
+        results = [elem for elem, score in sorted_results]
+        
+        # Eğer yeterli sonuç yoksa, tüm class'ları da ekle (fallback)
+        if len(results) < 5:
+            for element in elements:
+                if element.type == "class" and element not in results:
+                    results.append(element)
         
         return results
     
