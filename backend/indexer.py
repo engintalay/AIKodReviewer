@@ -330,8 +330,7 @@ class CodeIndexer:
         # Sorguyu kelimelere ayır
         query_words = [w.strip() for w in query_lower.split() if len(w.strip()) > 2]
         
-        results = []
-        scored_results = {}  # {element: score}
+        scored_results = []  # [(element, score), ...]
         
         for element in elements:
             element_name_lower = element.name.lower()
@@ -352,11 +351,11 @@ class CodeIndexer:
             
             # Eğer bir puan varsa ekle
             if score > 0:
-                scored_results[element] = score
+                scored_results.append((element, score))
         
         # Sonuçları puana göre sırala
-        sorted_results = sorted(scored_results.items(), key=lambda x: -x[1])
-        results = [elem for elem, score in sorted_results]
+        scored_results.sort(key=lambda x: -x[1])
+        results = [elem for elem, score in scored_results]
         
         # Eğer yeterli sonuç yoksa, tüm class'ları da ekle (fallback)
         if len(results) < 5:
